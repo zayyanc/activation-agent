@@ -1,5 +1,5 @@
 import { createGateway } from "@ai-sdk/gateway";
-import { generateText, tool, stepCountIs } from "ai";
+import { streamText, tool, stepCountIs } from "ai";
 import { z } from "zod";
 
 const gateway = createGateway();
@@ -168,17 +168,34 @@ export async function OPTIONS(req: Request) {
   return new Response(null, { status: 204, headers: corsHeaders(req) });
 }
 
+// ── SSE helpers ───────────────────────────────────────────────────────────────
+
+function sseEvent(type: string, data: unknown): string {
+  return `data: ${JSON.stringify({ type, ...( data as object) })}\n\n`;
+}
+
 // ── POST handler ──────────────────────────────────────────────────────────────
 
 export async function POST(req: Request) {
   const cors = corsHeaders(req);
   const { trigger, userContext } = await req.json();
 
-  const result = await generateText({
-    model: gateway("anthropic/claude-3-5-haiku-20241022"),
-    tools,
-    stopWhen: stepCountIs(8),
-    system: `You are a lifecycle messaging agent for a developer-focused SaaS product.
+  const encoder = new TextEncoder();
+
+  const stream = new ReadableStream({
+    async start(controller) {
+      const send = (type: string, data: unknown) => {
+        controller.enqueue(encoder.encode(sseEvent(type, data)));
+      };
+
+      try {
+        const toolTrace: Array<{ toolName: string; args: Record<string, unknown>; result: unknown }> = [];
+
+        const result = streamText({
+          model: gateway("anthropic/claude-3-5-haiku-20241022"),
+          tools,
+          stopWhen: stepCountIs(8),
+          system: `You are a lifecycle messaging agent for a developer-focused SaaS product.
 
 Your job is to decide whether to contact a user after a lifecycle trigger, and write the message if you do.
 
@@ -215,60 +232,81 @@ EMAIL_SUBJECT: none
 EMAIL_BODY: none
 IN_APP: none`,
 
-    prompt: `Trigger: ${trigger}
+          prompt: `Trigger: ${trigger}
 User context: ${JSON.stringify(userContext)}
 User ID: user_001
 
 Work through the tools in order, then write the final output.`,
+
+          onChunk: ({ chunk }) => {
+            if (chunk.type === "tool-call") {
+              const c = chunk as unknown as { toolName: string; toolCallId: string; input: Record<string, unknown> };
+              send("tool_start", { toolName: c.toolName, toolCallId: c.toolCallId, args: c.input ?? {} });
+            }
+            if (chunk.type === "tool-result") {
+              const r = chunk as unknown as { toolName: string; toolCallId: string; output: unknown };
+              send("tool_done", { toolName: r.toolName, toolCallId: r.toolCallId, result: r.output });
+              toolTrace.push({ toolName: r.toolName, args: {}, result: r.output });
+            }
+          },
+        });
+
+        // Consume the stream to completion
+        const finalResult = await result;
+        const finalText = (await finalResult.text) as string;
+
+        // Rebuild full toolTrace with args from steps
+        const fullTrace: Array<{ toolName: string; args: Record<string, unknown>; result: unknown }> = [];
+        for (const step of await finalResult.steps) {
+          for (const call of step.toolCalls) {
+            const typedCall = call as unknown as { toolName: string; toolCallId: string; input: Record<string, unknown> };
+            const matchingResult = step.toolResults?.find(
+              (r: { toolCallId: string }) => r.toolCallId === typedCall.toolCallId
+            );
+            fullTrace.push({
+              toolName: typedCall.toolName,
+              args: typedCall.input ?? {},
+              result: matchingResult ? (matchingResult as { output: unknown }).output : null,
+            });
+          }
+        }
+
+        // Extract decision
+        const decisionEntry = fullTrace.find((t) => t.toolName === "decide_channel");
+        const decision = decisionEntry?.result as undefined | {
+          committed: boolean; channel: string; reasoning: string; urgency: number; suppressedOverride: boolean;
+        } | null;
+
+        // Parse output block
+        const outputMatch = finalText.split("---OUTPUT---")[1] ?? "";
+        const extractLine = (key: string) => {
+          const match = outputMatch.match(new RegExp(`${key}:\\s*(.+)`));
+          return match ? match[1].trim() : "";
+        };
+
+        send("complete", {
+          toolTrace: fullTrace,
+          decision,
+          messages: {
+            email: { subject: extractLine("EMAIL_SUBJECT"), body: extractLine("EMAIL_BODY") },
+            inApp: { body: extractLine("IN_APP") },
+          },
+          steps: (await finalResult.steps).length,
+        });
+      } catch (err) {
+        send("error", { message: err instanceof Error ? err.message : "Unknown error" });
+      } finally {
+        controller.close();
+      }
+    },
   });
 
-  // Extract tool trace from steps
-  const toolTrace: Array<{ toolName: string; args: Record<string, unknown>; result: unknown }> = [];
-
-  for (const step of result.steps) {
-    for (const call of step.toolCalls) {
-      const typedCall = call as unknown as { toolName: string; toolCallId: string; input: Record<string, unknown> };
-      const matchingResult = step.toolResults?.find(
-        (r: { toolCallId: string }) => r.toolCallId === typedCall.toolCallId
-      );
-      toolTrace.push({
-        toolName: typedCall.toolName,
-        args: typedCall.input ?? {},
-        result: matchingResult ? (matchingResult as { output: unknown }).output : null,
-      });
-    }
-  }
-
-  // Extract the committed channel decision
-  const decisionEntry = toolTrace.find((t) => t.toolName === "decide_channel");
-  const decision = decisionEntry?.result as undefined | {
-    committed: boolean;
-    channel: string;
-    reasoning: string;
-    urgency: number;
-    suppressedOverride: boolean;
-  } | null;
-
-  // Parse the structured output from finalText
-  const finalText = result.text;
-  const outputMatch = finalText.split("---OUTPUT---")[1] ?? "";
-
-  const extractLine = (key: string) => {
-    const match = outputMatch.match(new RegExp(`${key}:\\s*(.+)`));
-    return match ? match[1].trim() : "";
-  };
-
-  const emailSubject = extractLine("EMAIL_SUBJECT");
-  const emailBody = extractLine("EMAIL_BODY");
-  const inApp = extractLine("IN_APP");
-
-  return Response.json({
-    toolTrace,
-    decision,
-    messages: {
-      email: { subject: emailSubject, body: emailBody },
-      inApp: { body: inApp },
+  return new Response(stream, {
+    headers: {
+      ...cors,
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
     },
-    steps: result.steps.length,
-  }, { headers: cors });
+  });
 }
