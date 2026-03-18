@@ -1,5 +1,7 @@
-import { anthropic } from "@ai-sdk/anthropic";
+import { createGateway } from "@ai-sdk/gateway";
 import { generateObject } from "ai";
+
+const gateway = createGateway();
 import { z } from "zod";
 
 const outputSchema = z.object({
@@ -17,7 +19,7 @@ export async function POST(req: Request) {
   const { trigger, userContext } = await req.json();
 
   const { object } = await generateObject({
-    model: anthropic("claude-3-5-haiku-20241022"),
+    model: gateway("anthropic/claude-3-5-haiku-20241022"),
     schema: outputSchema,
     system: `You are a lifecycle marketing agent for a developer-focused SaaS product.
 Your job is to generate precise, human-feeling activation messages — not marketing fluff.
