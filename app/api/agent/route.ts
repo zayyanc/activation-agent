@@ -175,7 +175,7 @@ export async function POST(req: Request) {
   const { trigger, userContext } = await req.json();
 
   const result = await generateText({
-    model: gateway("anthropic:claude-3-5-haiku-20241022"),
+    model: gateway("anthropic/claude-3-5-haiku-20241022"),
     tools,
     stopWhen: stepCountIs(8),
     system: `You are a lifecycle messaging agent for a developer-focused SaaS product.
