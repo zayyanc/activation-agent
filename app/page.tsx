@@ -39,15 +39,104 @@ const EXAMPLE_TRIGGERS = [
   },
 ];
 
-type Output = {
-  email: { subject: string; body: string };
-  inApp: { body: string };
-  reasoning: string;
+type ToolTraceEntry = {
+  toolName: string;
+  args: Record<string, unknown>;
+  result: unknown;
 };
+
+type ChannelDecision = {
+  channel: "email" | "in-app" | "both" | "none";
+  reasoning: string;
+  urgency: number;
+};
+
+type AgentOutput = {
+  toolTrace: ToolTraceEntry[];
+  decision: ChannelDecision | null;
+  messages: {
+    email: { subject: string; body: string };
+    inApp: { body: string };
+  };
+  steps: number;
+};
+
+const TOOL_LABELS: Record<string, string> = {
+  get_user_history: "Checked message history",
+  check_suppression: "Checked suppression status",
+  score_urgency: "Scored urgency",
+  decide_channel: "Committed channel decision",
+};
+
+const CHANNEL_COLORS: Record<string, string> = {
+  email: "bg-[#0d2235] text-[#4da6ff]",
+  "in-app": "bg-[#1a1a0d] text-[#b3a020]",
+  both: "bg-[#0d2e1a] text-[#3dd68c]",
+  none: "bg-[#1a1a1a] text-[#555]",
+};
+
+function UrgencyDots({ score }: { score: number }) {
+  return (
+    <div className="flex items-center gap-1">
+      {[1, 2, 3, 4, 5].map((i) => (
+        <div
+          key={i}
+          className={`w-1.5 h-1.5 rounded-full ${
+            i <= score ? "bg-white" : "bg-[#333]"
+          }`}
+        />
+      ))}
+      <span className="text-[11px] text-[#555] ml-1">{score}/5</span>
+    </div>
+  );
+}
+
+function ToolTraceItem({ entry }: { entry: ToolTraceEntry }) {
+  const [open, setOpen] = useState(false);
+  const label = TOOL_LABELS[entry.toolName] ?? entry.toolName;
+
+  return (
+    <div className="border border-[#1a1a1a] rounded-md overflow-hidden">
+      <button
+        onClick={() => setOpen(!open)}
+        className="w-full flex items-center justify-between px-4 py-2.5 text-left hover:bg-[#111] transition-colors"
+      >
+        <div className="flex items-center gap-2.5">
+          <span className="text-[11px] font-mono text-[#3dd68c]">fn</span>
+          <span className="text-[12px] text-[#999]">{label}</span>
+          <span className="text-[11px] font-mono text-[#444]">{entry.toolName}</span>
+        </div>
+        <span className="text-[11px] text-[#444]">{open ? "↑" : "↓"}</span>
+      </button>
+      {open && (
+        <div className="border-t border-[#1a1a1a] bg-[#0d0d0d] px-4 py-3 space-y-3">
+          <div>
+            <p className="text-[10px] uppercase tracking-[0.08em] text-[#444] mb-1">Input</p>
+            <pre
+              className="text-[11px] text-[#555] overflow-x-auto"
+              style={{ fontFamily: geistMono.style.fontFamily }}
+            >
+              {JSON.stringify(entry.args, null, 2)}
+            </pre>
+          </div>
+          <div>
+            <p className="text-[10px] uppercase tracking-[0.08em] text-[#444] mb-1">Output</p>
+            <pre
+              className="text-[11px] text-[#555] overflow-x-auto"
+              style={{ fontFamily: geistMono.style.fontFamily }}
+            >
+              {JSON.stringify(entry.result, null, 2)}
+            </pre>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default function Home() {
   const [selected, setSelected] = useState(0);
-  const [output, setOutput] = useState<Output | null>(null);
+  const [output, setOutput] = useState<AgentOutput | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -65,7 +154,7 @@ export default function Home() {
       const data = await res.json();
       setOutput(data);
     } catch {
-      setError("Something went wrong. Check your ANTHROPIC_API_KEY.");
+      setError("Something went wrong. Check the Vercel logs.");
     } finally {
       setLoading(false);
     }
@@ -89,7 +178,7 @@ export default function Home() {
             Lifecycle message generator
           </h1>
           <p className="mt-1.5 text-[13px] text-[#666] leading-[1.6]">
-            Select a trigger, run the agent, and get a personalized activation sequence.
+            The agent checks message history, suppression status, and urgency before deciding how to reach the user.
           </p>
         </header>
 
@@ -134,7 +223,7 @@ export default function Home() {
           disabled={loading}
           className="w-full py-2.5 rounded-md bg-white text-black text-[13px] font-medium hover:bg-[#e0e0e0] transition-colors disabled:opacity-40 disabled:cursor-not-allowed mb-8"
         >
-          {loading ? "Generating…" : "Run agent →"}
+          {loading ? "Agent running…" : "Run agent →"}
         </button>
 
         {/* Error */}
@@ -144,36 +233,66 @@ export default function Home() {
 
         {/* Output */}
         {output && (
-          <section className="space-y-4">
-            <p className="text-[11px] uppercase tracking-[0.08em] text-[#444] font-medium">
-              Output
-            </p>
+          <div className="space-y-8">
 
-            {/* Reasoning */}
-            <div className="border border-[#1a1a1a] rounded-md px-4 py-3">
-              <p className="text-[11px] uppercase tracking-[0.08em] text-[#444] font-medium mb-1.5">
-                Reasoning
-              </p>
-              <p className="text-[13px] text-[#777] leading-[1.6]">{output.reasoning}</p>
-            </div>
+            {/* Agent trace */}
+            <section>
+              <div className="flex items-center gap-2 mb-3">
+                <p className="text-[11px] uppercase tracking-[0.08em] text-[#444] font-medium">
+                  Agent trace
+                </p>
+                <span className="text-[11px] text-[#333]">{output.steps} steps</span>
+              </div>
+              <div className="space-y-1.5">
+                {output.toolTrace.map((entry, i) => (
+                  <ToolTraceItem key={i} entry={entry} />
+                ))}
+              </div>
+            </section>
 
-            {/* Email */}
-            <div className="border border-[#1a1a1a] rounded-md px-4 py-3 space-y-2">
-              <p className="text-[11px] uppercase tracking-[0.08em] text-[#444] font-medium">
-                Email
-              </p>
-              <p className="text-[13px] font-medium text-white">{output.email.subject}</p>
-              <p className="text-[13px] text-[#777] leading-[1.6]">{output.email.body}</p>
-            </div>
+            {/* Decision */}
+            {output.decision && (
+              <section>
+                <p className="text-[11px] uppercase tracking-[0.08em] text-[#444] font-medium mb-3">
+                  Decision
+                </p>
+                <div className="border border-[#1a1a1a] rounded-md p-4 space-y-3">
+                  <div className="flex items-center gap-3">
+                    <span className={`text-[11px] font-medium px-2 py-0.5 rounded tracking-wider uppercase ${CHANNEL_COLORS[output.decision.channel] ?? "bg-[#1a1a1a] text-[#555]"}`}>
+                      {output.decision.channel}
+                    </span>
+                    <UrgencyDots score={output.decision.urgency} />
+                  </div>
+                  <p className="text-[13px] text-[#777] leading-[1.6]">{output.decision.reasoning}</p>
+                </div>
+              </section>
+            )}
 
-            {/* In-app */}
-            <div className="border border-[#1a1a1a] rounded-md px-4 py-3 space-y-2">
-              <p className="text-[11px] uppercase tracking-[0.08em] text-[#444] font-medium">
-                In-app nudge
-              </p>
-              <p className="text-[13px] text-[#777] leading-[1.6]">{output.inApp.body}</p>
-            </div>
-          </section>
+            {/* Messages */}
+            {output.decision?.channel !== "none" && (
+              <section>
+                <p className="text-[11px] uppercase tracking-[0.08em] text-[#444] font-medium mb-3">
+                  Messages
+                </p>
+                <div className="space-y-3">
+                  {(output.decision?.channel === "email" || output.decision?.channel === "both") && output.messages.email.subject !== "none" && (
+                    <div className="border border-[#1a1a1a] rounded-md p-4 space-y-2">
+                      <span className="text-[11px] font-medium text-[#555] uppercase tracking-[0.08em]">Email</span>
+                      <p className="text-[13px] font-medium text-white">{output.messages.email.subject}</p>
+                      <p className="text-[13px] text-[#777] leading-[1.6]">{output.messages.email.body}</p>
+                    </div>
+                  )}
+                  {(output.decision?.channel === "in-app" || output.decision?.channel === "both") && output.messages.inApp.body !== "none" && (
+                    <div className="border border-[#1a1a1a] rounded-md p-4 space-y-2">
+                      <span className="text-[11px] font-medium text-[#555] uppercase tracking-[0.08em]">In-app nudge</span>
+                      <p className="text-[13px] text-[#777] leading-[1.6]">{output.messages.inApp.body}</p>
+                    </div>
+                  )}
+                </div>
+              </section>
+            )}
+
+          </div>
         )}
 
       </div>
