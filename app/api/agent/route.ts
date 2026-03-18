@@ -174,11 +174,34 @@ function sseEvent(type: string, data: unknown): string {
   return `data: ${JSON.stringify({ type, ...( data as object) })}\n\n`;
 }
 
+// ── Turnstile verification ────────────────────────────────────────────────────
+
+async function verifyTurnstile(token: string, ip: string): Promise<boolean> {
+  const res = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      secret: process.env.TURNSTILE_SECRET_KEY,
+      response: token,
+      remoteip: ip,
+    }),
+  });
+  const data = await res.json() as { success: boolean };
+  return data.success === true;
+}
+
 // ── POST handler ──────────────────────────────────────────────────────────────
 
 export async function POST(req: Request) {
   const cors = corsHeaders(req);
-  const { trigger, userContext } = await req.json();
+  const body = await req.json();
+  const { trigger, userContext, turnstileToken } = body;
+
+  // Verify Turnstile token
+  const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "";
+  if (!turnstileToken || !(await verifyTurnstile(turnstileToken, ip))) {
+    return Response.json({ error: "Verification failed" }, { status: 403, headers: cors });
+  }
 
   const encoder = new TextEncoder();
 
