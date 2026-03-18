@@ -149,19 +149,29 @@ const tools = {
 
 // ── CORS ──────────────────────────────────────────────────────────────────────
 
-const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": "https://www.zayyanc.com",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
-};
+const ALLOWED_ORIGINS = [
+  "https://zayyanc.com",
+  "https://www.zayyanc.com",
+];
 
-export async function OPTIONS() {
-  return new Response(null, { status: 204, headers: CORS_HEADERS });
+function corsHeaders(req: Request) {
+  const origin = req.headers.get("origin") ?? "";
+  const allowed = ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
+  return {
+    "Access-Control-Allow-Origin": allowed,
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+  };
+}
+
+export async function OPTIONS(req: Request) {
+  return new Response(null, { status: 204, headers: corsHeaders(req) });
 }
 
 // ── POST handler ──────────────────────────────────────────────────────────────
 
 export async function POST(req: Request) {
+  const cors = corsHeaders(req);
   const { trigger, userContext } = await req.json();
 
   const result = await generateText({
@@ -260,5 +270,5 @@ Work through the tools in order, then write the final output.`,
       inApp: { body: inApp },
     },
     steps: result.steps.length,
-  }, { headers: CORS_HEADERS });
+  }, { headers: cors });
 }
